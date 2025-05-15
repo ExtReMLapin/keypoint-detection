@@ -11,7 +11,7 @@ from typing import Callable, Dict, List, Tuple
 
 import torch
 from torchmetrics import Metric
-
+from torch import nn
 
 @dataclass
 class Keypoint:
@@ -166,53 +166,109 @@ def calculate_ap_from_pr(precision: List[float], recall: List[float]) -> float:
 
 
 class KeypointAPMetric(Metric):
-    """torchmetrics-like interface for the Average Precision implementation"""
-
-    full_state_update = False
+    full_state_update = True  # Important for distributed training
 
     def __init__(self, keypoint_threshold_distance: float, dist_sync_on_step=False):
-        """
-
-        Args:
-            keypoint_threshold_distance (float): distance from ground_truth keypoint that is used to classify keypoint as TP or FP.
-        """
-
         super().__init__(dist_sync_on_step=dist_sync_on_step)
 
         self.keypoint_threshold_distance = keypoint_threshold_distance
 
-        default: Callable = lambda: []
-        self.add_state("classified_keypoints", default=default(), dist_reduce_fx="cat")  # list of ClassifiedKeypoints
-        self.add_state("total_ground_truth_keypoints", default=torch.tensor(0), dist_reduce_fx="sum")
+        # Initialize tensor states with device=None (they'll be moved to the correct device)
+        self.add_state("tp_count", default=torch.tensor(0.), dist_reduce_fx="sum")
+        self.add_state("fp_count", default=torch.tensor(0.), dist_reduce_fx="sum")
+        self.add_state("total_ground_truth_keypoints", default=torch.tensor(0.), dist_reduce_fx="sum")
+        
+        # For probability scores, initialize empty tensors
+        self.add_state("all_probabilities", default=[], dist_reduce_fx=None)
+        self.add_state("all_is_tp", default=[], dist_reduce_fx=None)
+        
+        # For local tracking only - will be processed before compute()
+        self._classified_keypoints = []
 
     def update(self, detected_keypoints: List[DetectedKeypoint], gt_keypoints: List[Keypoint]):
-
+        # Classify each keypoint as TP or FP
         classified_img_keypoints = keypoint_classification(
             detected_keypoints, gt_keypoints, self.keypoint_threshold_distance
         )
-
-        self.classified_keypoints += classified_img_keypoints
-
+        
+        # Store locally for processing later
+        self._classified_keypoints.extend(classified_img_keypoints)
+        
+        # Update tensor states
+        for keypoint in classified_img_keypoints:
+            # Track probability and whether it's a TP
+            self.all_probabilities.append(keypoint.probability)
+            self.all_is_tp.append(1.0 if keypoint.true_positive else 0.0)
+            
+            if keypoint.true_positive:
+                self.tp_count += 1
+            else:
+                self.fp_count += 1
+                
         self.total_ground_truth_keypoints += len(gt_keypoints)
 
     def compute(self):
-        p, r = calculate_precision_recall(self.classified_keypoints, int(self.total_ground_truth_keypoints.cpu()))
-        m_ap = calculate_ap_from_pr(p, r)
-        return m_ap
-
-
+        # Convert lists to tensors for synchronization, ensuring they're on the right device
+        if self.all_probabilities and self.all_is_tp:
+            all_probabilities = torch.tensor(self.all_probabilities, device=self.tp_count.device)
+            all_is_tp = torch.tensor(self.all_is_tp, device=self.tp_count.device)
+        else:
+            # Create empty tensors with the correct dimensions and device
+            all_probabilities = torch.tensor([], device=self.tp_count.device)
+            all_is_tp = torch.tensor([], device=self.tp_count.device)
+            
+        # These will be properly synced across devices
+        tp_count = self.tp_count
+        fp_count = self.fp_count
+        total_gt_count = self.total_ground_truth_keypoints
+        
+        # If no detections or ground truth, return 0
+        if total_gt_count == 0 or (tp_count == 0 and fp_count == 0):
+            return 0.0
+            
+        # Compute AP using synced tensors (all now on the proper device)
+        if len(all_probabilities) == 0:
+            return 0.0
+            
+        # Sort by probability
+        sorted_indices = torch.argsort(all_probabilities, descending=True)
+        sorted_is_tp = all_is_tp[sorted_indices]
+        
+        # Calculate precision and recall points
+        precision = [1.0]
+        recall = [0.0]
+        
+        tp_sum = 0
+        fp_sum = 0
+        
+        for is_tp in sorted_is_tp:
+            if is_tp > 0.5:  # TP
+                tp_sum += 1
+            else:  # FP
+                fp_sum += 1
+                
+            precision.append(tp_sum / (tp_sum + fp_sum) if tp_sum + fp_sum > 0 else 0)
+            recall.append(tp_sum / total_gt_count.item() if total_gt_count.item() > 0 else 0)
+            
+        precision.append(0.0)
+        recall.append(1.0)
+        
+        # Calculate AP using your existing function
+        ap = calculate_ap_from_pr(precision, recall)
+        return ap
 class KeypointAPMetrics(Metric):
-    """
-    Torchmetrics-like interface for calculating average precisions over different keypoint_threshold_distances.
-    Uses KeypointAPMetric class.
-    """
-
-    full_state_update = False
-
+    full_state_update = True  # Important for distributed training
+    
     def __init__(self, keypoint_threshold_distances: List[int], dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
-
-        self.ap_metrics = [KeypointAPMetric(dst, dist_sync_on_step) for dst in keypoint_threshold_distances]
+        
+        # Register metrics as a ModuleList so PyTorch handles them properly
+        self.ap_metrics = nn.ModuleList([
+            KeypointAPMetric(dst, dist_sync_on_step) 
+            for dst in keypoint_threshold_distances
+        ])
+        
+        self.keypoint_threshold_distances = keypoint_threshold_distances
 
     def update(self, detected_keypoints: List[DetectedKeypoint], gt_keypoints: List[Keypoint]):
         for metric in self.ap_metrics:
@@ -220,8 +276,8 @@ class KeypointAPMetrics(Metric):
 
     def compute(self) -> Dict[float, float]:
         result_dict = {}
-        for metric in self.ap_metrics:
-            result_dict.update({metric.keypoint_threshold_distance: metric.compute()})
+        for i, metric in enumerate(self.ap_metrics):
+            result_dict.update({float(self.keypoint_threshold_distances[i]): metric.compute()})
         return result_dict
 
     def reset(self) -> None:

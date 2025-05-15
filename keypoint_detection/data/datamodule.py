@@ -97,6 +97,11 @@ class KeypointsDataModule(pl.LightningDataModule):
                     ),
                     A.GaussianBlur(p=0.2, blur_limit=(3, 3)),
                     A.Sharpen(p=0.2),
+                    A.RandomRotate90(p=0.5),
+                    A.Transpose(p=0.5),
+                    A.HorizontalFlip(p=0.5),
+                    A.VerticalFlip(p=0.5),
+                    
                     A.GaussNoise(),
                 ]
             )
@@ -133,6 +138,8 @@ class KeypointsDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             collate_fn=COCOKeypointsDataset.collate_fn,
             pin_memory=True,  # usually a little faster
+            persistent_workers=True,
+            worker_init_fn=seed_worker,
         )
         return dataloader
 
@@ -151,6 +158,9 @@ class KeypointsDataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             collate_fn=COCOKeypointsDataset.collate_fn,
+            persistent_workers=True,
+            worker_init_fn=seed_worker,
+            pin_memory=True,  # usually a little faster
         )
         return dataloader
 
@@ -164,6 +174,9 @@ class KeypointsDataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=0,
             collate_fn=COCOKeypointsDataset.collate_fn,
+            persistent_workers=True,
+            worker_init_fn=seed_worker,
+            pin_memory=True,  # usually a little faster
         )
         return dataloader
 
