@@ -1,6 +1,7 @@
 """train detector based on argparse configuration"""
 from argparse import ArgumentParser
 from typing import Tuple
+import os
 
 import pytorch_lightning as pl
 import wandb
@@ -12,7 +13,7 @@ from keypoint_detection.models.backbones.backbone_factory import BackboneFactory
 from keypoint_detection.models.detector import KeypointDetector
 from keypoint_detection.tasks.train_utils import create_pl_trainer, parse_channel_configuration
 from keypoint_detection.utils.load_checkpoints import get_model_from_wandb_checkpoint
-from keypoint_detection.utils.path import get_wandb_log_dir_path
+from keypoint_detection.utils.path import get_wandb_log_dir_path, get_artifact_dir_path
 
 
 def add_system_args(parent_parser: ArgumentParser) -> ArgumentParser:
@@ -141,6 +142,9 @@ def train_cli():
     hparams = vars(parser.parse_args())
     hparams["keypoint_channel_configuration"] = parse_channel_configuration(hparams["keypoint_channel_configuration"])
     print(f" argparse arguments ={hparams}")
+    
+    os.environ["WANDB_DIR"] = get_wandb_log_dir_path()
+    os.environ["PL_ARTIFACT_DIR"] = get_artifact_dir_path()
 
     # initialize wandb here, this allows for using wandb sweeps.
     # with sweeps, wandb will send hyperparameters to the current agent after the init
@@ -151,7 +155,7 @@ def train_cli():
         project=hparams["wandb_project"],
         entity=hparams["wandb_entity"],
         config=hparams,
-        dir=get_wandb_log_dir_path(),  # dir should already exist! will fallback to /tmp and not log images otherwise..
+        dir=os.environ["WANDB_DIR"],
     )
 
     # get (possibly updated by sweep) config parameters
@@ -163,4 +167,23 @@ def train_cli():
 
 
 if __name__ == "__main__":
+    import sys
+    original_args = sys.argv.copy()
+    debug_args = [
+        sys.argv[0],  # Keep the script name
+        "--keypoint_channel_configuration", "minutiae",
+        "--json_dataset_path", "./dataset/Lucboyer_new_keypoints_dataset_train_keypoints.json",
+        "--json_validation_dataset_path", "./dataset/Lucboyer_new_keypoints_dataset_valid_keypoints.json",
+        "--batch_size", "1",
+        "--wandb_project", "minutia-keypoints",
+        "--max_epochs", "100",
+        "--backbone_type", "MaxVitUnet",
+        "--learning_rate", "3e-4",
+        "--accelerator", "gpu",
+        "--devices", "3",
+        "--precision", "16",
+        "--augment_train",
+        "--max_image_size", "512"
+    ]
+    sys.argv = debug_args
     train_cli()

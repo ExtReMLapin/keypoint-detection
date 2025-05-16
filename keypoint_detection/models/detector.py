@@ -303,10 +303,11 @@ class KeypointDetector(pl.LightningModule):
         return image_grids
 
     def log_channel_predictions_grids(self, image_grids, mode: str):
-        for channel_configuration, grid in zip(self.keypoint_channel_configuration, image_grids):
-            label = get_logging_label_from_channel_configuration(channel_configuration, mode)
-            image_caption = "top: predicted heatmaps, bottom: gt heatmaps"
-            self.logger.experiment.log({label: wandb.Image(grid, caption=image_caption, file_type="jpg")})
+        if self.trainer.is_global_zero:
+            for channel_configuration, grid in zip(self.keypoint_channel_configuration, image_grids):
+                label = get_logging_label_from_channel_configuration(channel_configuration, mode)
+                image_caption = "top: predicted heatmaps, bottom: gt heatmaps"
+                self.logger.experiment.log({label: wandb.Image(grid, caption=image_caption, file_type="jpg")})
 
     def visualize_predicted_keypoints(self, result_dict):
         images = result_dict["input_images"]
@@ -321,9 +322,10 @@ class KeypointDetector(pl.LightningModule):
         return grid
 
     def log_predicted_keypoints(self, grid, mode=str):
-        label = f"predicted_keypoints_{mode}"
-        image_caption = "predicted keypoints"
-        self.logger.experiment.log({label: wandb.Image(grid, caption=image_caption)})
+        if self.trainer.is_global_zero:
+            label = f"predicted_keypoints_{mode}"
+            image_caption = "predicted keypoints"
+            self.logger.experiment.log({label: wandb.Image(grid, caption=image_caption)})
 
     def validation_step(self, val_batch, batch_idx):
         # no need to switch model to eval mode, this is handled by pytorch lightning
