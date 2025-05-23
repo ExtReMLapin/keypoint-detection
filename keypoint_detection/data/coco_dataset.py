@@ -90,7 +90,6 @@ class COCOKeypointsDataset(ImageDataset):
             print(f"Warning: Adjusted max_image_size from {original_max_size} to {max_image_size} to ensure divisibility by {divisor}")
         self.max_image_size = max_image_size
 
-        print(f"{detect_only_visible_keypoints=}")
 
         self.random_crop_transform = None
         self.transform = transform

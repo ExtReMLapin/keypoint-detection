@@ -517,7 +517,7 @@ class KeypointDetector(pl.LightningModule):
         self.log("test/gt_loss", result_dict["gt_loss"])
 
     def log_and_reset_mean_ap(self, mode: str):
-        mean_ap_per_threshold = torch.zeros(len(self.maximal_gt_keypoint_pixel_distances))
+        mean_ap_per_threshold = torch.zeros(len(self.maximal_gt_keypoint_pixel_distances),  device=self.device)
         if mode == "train":
             metrics = self.ap_training_metrics
         elif mode == "validation":
@@ -531,7 +531,7 @@ class KeypointDetector(pl.LightningModule):
         print(f" # {mode} metrics:")
         for channel_idx, channel_name in enumerate(self.keypoint_channel_configuration):
             channel_aps = self.compute_and_log_metrics_for_channel(metrics[channel_idx], channel_name, mode)
-            mean_ap_per_threshold += torch.tensor(channel_aps)
+            mean_ap_per_threshold += torch.tensor(channel_aps, device=self.device)
 
         # calculate the mAP over all channels for each threshold distance, and log them
         for i, maximal_distance in enumerate(self.maximal_gt_keypoint_pixel_distances):
@@ -675,6 +675,7 @@ class KeypointDetector(pl.LightningModule):
             self.log(f"{training_mode}/{channel}_ap/d={float(maximal_distance):.1f}", ap, sync_dist=True)
 
         mean_ap = sum(ap_metrics.values()) / len(ap_metrics.values())
+        mean_ap = torch.tensor(mean_ap, device=self.device)
         self.log(f"{training_mode}/{channel}_ap/meanAP", mean_ap, sync_dist=True)  # log top level for wandb hyperparam chart.
 
         metrics.reset()
@@ -756,7 +757,7 @@ class KeypointDetector(pl.LightningModule):
         parser.add_argument(
             "--enable_threshold_optimization",
             action="store_true",
-            default=False,
+            default=True,
             help="Enable dynamic threshold optimization during validation"
         )
         parser.add_argument(
