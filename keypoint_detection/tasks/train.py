@@ -167,7 +167,6 @@ def train_cli():
     # get parser arguments and filter the specified arguments
     hparams = vars(parser.parse_args())
     hparams["keypoint_channel_configuration"] = parse_channel_configuration(hparams["keypoint_channel_configuration"])
-    print(f" argparse arguments ={hparams}")
     
     os.environ["WANDB_DIR"] = get_wandb_log_dir_path()
     os.environ["PL_ARTIFACT_DIR"] = get_artifact_dir_path()
