@@ -90,6 +90,10 @@ class KeypointDetector(pl.LightningModule):
         ap_epoch_freq: int,
         lr_scheduler_relative_threshold: float,
         max_keypoints: int,
+        enable_threshold_optimization:bool,
+        threshold_search_low:float,
+        threshold_search_high:float,
+        threshold_search_tolerance:float,
         **kwargs,
     ):
         """[summary]
@@ -172,10 +176,10 @@ class KeypointDetector(pl.LightningModule):
         self.best_validation_map = 0.0
         
         # Threshold optimization parameters (can be made configurable via argparse)
-        self.enable_threshold_optimization = True
-        self.threshold_search_low = 0.0001
-        self.threshold_search_high = 1.0
-        self.threshold_search_tolerance = 1e-4
+        self.enable_threshold_optimization = enable_threshold_optimization
+        self.threshold_search_low = threshold_search_low
+        self.threshold_search_high = threshold_search_high
+        self.threshold_search_tolerance = threshold_search_tolerance
 
     def forward(self, x: torch.Tensor):
         """
@@ -752,7 +756,7 @@ class KeypointDetector(pl.LightningModule):
         parser.add_argument(
             "--enable_threshold_optimization",
             action="store_true",
-            default=True,
+            default=False,
             help="Enable dynamic threshold optimization during validation"
         )
         parser.add_argument(
