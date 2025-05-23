@@ -1,5 +1,5 @@
 import argparse
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pytorch_lightning as pl
 import torch
@@ -74,6 +74,8 @@ class KeypointDetector(pl.LightningModule):
             type=int,
             help="the maximum number of keypoints to predict from the generated heatmaps. If set to -1, skimage will look for all peaks in the heatmap, if set to N (N>0) it will return the N most most certain ones.",
         )
+        
+        parent_parser = KeypointDetector.add_threshold_optimization_args(parent_parser)
         return parent_parser
 
     def __init__(
@@ -160,6 +162,20 @@ class KeypointDetector(pl.LightningModule):
         self.save_hyperparameters(ignore=["**kwargs", "backbone"])
 
         self._most_recent_val_mean_ap = 0.0  # used to store the most recent validation mean AP and log it in each epoch, so that checkpoint can be chosen based on this one.
+
+        # For storing validation data during epoch
+        self.validation_heatmaps = []
+        self.validation_gt_keypoints = []
+        
+        # Optimal threshold found during validation
+        self.optimal_threshold = 0.01  # Default threshold
+        self.best_validation_map = 0.0
+        
+        # Threshold optimization parameters (can be made configurable via argparse)
+        self.enable_threshold_optimization = True
+        self.threshold_search_low = 0.0001
+        self.threshold_search_high = 1.0
+        self.threshold_search_tolerance = 1e-4
 
     def forward(self, x: torch.Tensor):
         """
@@ -328,23 +344,158 @@ class KeypointDetector(pl.LightningModule):
             self.logger.experiment.log({label: wandb.Image(grid, caption=image_caption)})
 
     def validation_step(self, val_batch, batch_idx):
-        # no need to switch model to eval mode, this is handled by pytorch lightning
+        # Your existing validation_step code, but add data collection
         result_dict = self.shared_step(val_batch, batch_idx, include_visualization_data_in_result_dict=True)
-
-        if self.is_ap_epoch():
-            self.update_ap_metrics(result_dict, self.ap_validation_metrics)
-
-            log_images = batch_idx == 0 and self.current_epoch > 0 and self.is_ap_epoch()
+        
+        if self.is_ap_epoch() and self.enable_threshold_optimization:
+            # Store data for threshold optimization
+            predicted_heatmaps = result_dict["predicted_heatmaps"].detach().cpu()
+            gt_keypoints = result_dict["gt_keypoints"]
+            
+            # Store each sample in the batch separately for easier indexing later
+            for sample_idx in range(predicted_heatmaps.shape[0]):
+                self.validation_heatmaps.append(predicted_heatmaps[sample_idx:sample_idx+1])
+                # Reorganize gt_keypoints: from [channel][batch_sample] to [sample][channel]
+                sample_gt_keypoints = []
+                for channel_idx in range(len(gt_keypoints)):
+                    if sample_idx < len(gt_keypoints[channel_idx]):
+                        sample_gt_keypoints.append(gt_keypoints[channel_idx][sample_idx])
+                    else:
+                        sample_gt_keypoints.append(torch.tensor([]))
+                self.validation_gt_keypoints.append(sample_gt_keypoints)
+            
+            log_images = batch_idx == 0 and self.current_epoch > 0
             if log_images and isinstance(self.logger, pl.loggers.wandb.WandbLogger):
                 channel_grids = self.visualize_predictions_channels(result_dict)
                 self.log_channel_predictions_grids(channel_grids, mode="validation")
-
+                
                 keypoint_grids = self.visualize_predicted_keypoints(result_dict)
                 self.log_predicted_keypoints(keypoint_grids, mode="validation")
+        
+        elif self.is_ap_epoch() and not self.enable_threshold_optimization:
+            # Use old method if threshold optimization is disabled
+            self.update_ap_metrics(result_dict, self.ap_validation_metrics)
 
-        ## log (defaults to on_epoch, which aggregates the logged values over entire validation set)
         self.log("validation/epoch_loss", result_dict["loss"], sync_dist=True)
         self.log("validation/gt_loss", result_dict["gt_loss"], sync_dist=True)
+
+
+    def ternary_search_optimal_threshold(
+        self, 
+        heatmaps: List[torch.Tensor], 
+        gt_keypoints: List[List], 
+        low: float = None, 
+        high: float = None, 
+        tolerance: float = None
+    ) -> Tuple[float, float]:
+        """
+        Use ternary search to find the threshold that maximizes mAP.
+        
+        Args:
+            heatmaps: List of validation heatmaps (one per sample)
+            gt_keypoints: List of GT keypoints per sample [sample][channel][keypoint_list]
+            low: Lower bound for threshold search
+            high: Upper bound for threshold search  
+            tolerance: Search tolerance
+            
+        Returns:
+            (optimal_threshold, best_map)
+        """
+        
+        # Use instance parameters if not provided
+        if low is None:
+            low = self.threshold_search_low
+        if high is None:
+            high = self.threshold_search_high
+        if tolerance is None:
+            tolerance = self.threshold_search_tolerance
+        
+        print(f"# Searching optimal threshold in range [{low:.4f}, {high:.4f}] with tolerance {tolerance}")
+        
+        def evaluate_threshold(threshold: float) -> float:
+            """Evaluate mAP for a given threshold"""
+            # Create fresh metrics for this threshold evaluation
+            temp_metrics = [
+                KeypointAPMetrics(self.maximal_gt_keypoint_pixel_distances) 
+                for _ in self.keypoint_channel_configuration
+            ]
+            
+            # Extract keypoints with this threshold for each sample
+            for sample_idx, (sample_heatmap, sample_gt_keypoints) in enumerate(zip(heatmaps, gt_keypoints)):
+                
+                keypoints, scores = get_keypoints_from_heatmap_batch_maxpool(
+                    sample_heatmap.float(),
+                    self.max_keypoints,
+                    self.minimal_keypoint_pixel_distance,
+                    abs_max_threshold=threshold,
+                    return_scores=True
+                )
+                
+                # Update metrics for each channel
+                for channel_idx in range(len(self.keypoint_channel_configuration)):
+                    # Detected keypoints for this channel
+                    detected_keypoints_channel = []
+                    if (channel_idx < len(keypoints[0]) and 
+                        len(keypoints[0][channel_idx]) > 0 and 
+                        len(scores[0][channel_idx]) > 0):
+                        detected_keypoints_channel = [
+                            DetectedKeypoint(int(kp[0]), int(kp[1]), float(score)) 
+                            for kp, score in zip(keypoints[0][channel_idx], scores[0][channel_idx])
+                        ]
+                    
+                    # Ground truth keypoints for this channel
+                    gt_keypoints_channel = []
+                    if (channel_idx < len(sample_gt_keypoints) and 
+                        len(sample_gt_keypoints[channel_idx]) > 0):
+                        gt_keypoints_channel = [
+                            Keypoint(int(k[0]), int(k[1])) 
+                            for k in sample_gt_keypoints[channel_idx]
+                        ]
+                    
+                    temp_metrics[channel_idx].update(detected_keypoints_channel, gt_keypoints_channel)
+            
+            # Compute mean AP across all channels and thresholds
+            total_ap = 0.0
+            total_count = 0
+            
+            for channel_metrics in temp_metrics:
+                channel_aps = channel_metrics.compute()
+                if len(channel_aps) > 0:
+                    total_ap += sum(channel_aps.values())
+                    total_count += len(channel_aps)
+                channel_metrics.reset()
+            
+            mean_ap = total_ap / max(total_count, 1)
+            return mean_ap
+        
+        # Ternary search implementation
+        iteration = 0
+        max_iterations = 50  # Safety limit
+        
+        while high - low > tolerance and iteration < max_iterations:
+            mid1 = low + (high - low) / 3
+            mid2 = high - (high - low) / 3
+            
+            map1 = evaluate_threshold(mid1)
+            map2 = evaluate_threshold(mid2)
+            
+            if iteration % 5 == 0:  # Log progress every 5 iterations
+                print(f"# Iteration {iteration}: [{low:.4f}, {high:.4f}] -> mAP({mid1:.4f})={map1:.4f}, mAP({mid2:.4f})={map2:.4f}")
+            
+            if map1 < map2:
+                low = mid1
+            else:
+                high = mid2
+                
+            iteration += 1
+        
+        optimal_threshold = (low + high) / 2
+        best_map = evaluate_threshold(optimal_threshold)
+        
+        print(f"# Search completed in {iteration} iterations")
+        
+        return optimal_threshold, best_map
+
 
     def test_step(self, test_batch, batch_idx):
         # no need to switch model to eval mode, this is handled by pytorch lightning
@@ -394,7 +545,7 @@ class KeypointDetector(pl.LightningModule):
         if mode == "validation":
             self._most_recent_val_mean_ap = mean_ap
 
-    def training_epoch_end(self, outputs):
+    def on_train_epoch_end(self):
         """
         Called on the end of a training epoch.
         Used to compute and log the AP metrics.
@@ -402,13 +553,78 @@ class KeypointDetector(pl.LightningModule):
         if self.is_ap_epoch():
             self.log_and_reset_mean_ap("train")
 
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
         """
-        Called on the end of a validation epoch.
-        Used to compute and log the AP metrics.
+        Modified validation_epoch_end with dynamic threshold optimization
         """
         if self.is_ap_epoch():
+            if self.enable_threshold_optimization and len(self.validation_heatmaps) > 0:
+                print(f"\n# Optimizing confidence threshold for epoch {self.current_epoch}")
+                print(f"# Processing {len(self.validation_heatmaps)} validation samples")
+                
+                # Find optimal threshold
+                optimal_threshold, best_map = self.ternary_search_optimal_threshold(
+                    self.validation_heatmaps, 
+                    self.validation_gt_keypoints
+                )
+                
+                print(f"# Optimal threshold found: {optimal_threshold:.6f} (mAP: {best_map:.4f})")
+                
+                # Update stored optimal threshold
+                self.optimal_threshold = optimal_threshold
+                self.best_validation_map = best_map
+                
+                # Log the optimal threshold
+                self.log("validation/optimal_threshold", optimal_threshold, sync_dist=True)
+                self.log("validation/threshold_optimized_mAP", best_map, sync_dist=True)
+                
+                # Now compute final metrics with optimal threshold for detailed logging
+                self.ap_validation_metrics = [
+                    KeypointAPMetrics(self.maximal_gt_keypoint_pixel_distances) 
+                    for _ in self.keypoint_channel_configuration
+                ]
+                
+                # Re-evaluate with optimal threshold for detailed per-channel metrics
+                for sample_idx, (sample_heatmap, sample_gt_keypoints) in enumerate(zip(self.validation_heatmaps, self.validation_gt_keypoints)):
+                    
+                    keypoints, scores = get_keypoints_from_heatmap_batch_maxpool(
+                        sample_heatmap.float(),
+                        self.max_keypoints,
+                        self.minimal_keypoint_pixel_distance,
+                        abs_max_threshold=optimal_threshold,
+                        return_scores=True
+                    )
+                    
+                    for channel_idx in range(len(self.keypoint_channel_configuration)):
+                        # Detected keypoints for this channel
+                        detected_keypoints_channel = []
+                        if (channel_idx < len(keypoints[0]) and 
+                            len(keypoints[0][channel_idx]) > 0 and 
+                            len(scores[0][channel_idx]) > 0):
+                            detected_keypoints_channel = [
+                                DetectedKeypoint(int(kp[0]), int(kp[1]), float(score)) 
+                                for kp, score in zip(keypoints[0][channel_idx], scores[0][channel_idx])
+                            ]
+                        
+                        # Ground truth keypoints for this channel
+                        gt_keypoints_channel = []
+                        if (channel_idx < len(sample_gt_keypoints) and 
+                            len(sample_gt_keypoints[channel_idx]) > 0):
+                            gt_keypoints_channel = [
+                                Keypoint(int(k[0]), int(k[1])) 
+                                for k in sample_gt_keypoints[channel_idx]
+                            ]
+                        
+                        self.ap_validation_metrics[channel_idx].update(detected_keypoints_channel, gt_keypoints_channel)
+                
+                # Clear stored validation data
+                self.validation_heatmaps.clear()
+                self.validation_gt_keypoints.clear()
+            
+            # Log final metrics (works for both optimized and non-optimized cases)
             self.log_and_reset_mean_ap("validation")
+        
+        # Update checkpointing metric
         self.log("checkpointing_metrics/valmeanAP", self._most_recent_val_mean_ap, sync_dist=True)
 
     def test_epoch_end(self, outputs):
@@ -472,23 +688,29 @@ class KeypointDetector(pl.LightningModule):
 
     def extract_detected_keypoints_from_heatmap(self, heatmap: torch.Tensor) -> List[DetectedKeypoint]:
         """
-        Extract keypoints from a single channel prediction and format them for AP calculation.
-
-        Args:
-        heatmap (torch.Tensor) : H x W tensor that represents a heatmap.
+        Modified to use optimal threshold found during validation
         """
         if heatmap.dtype == torch.float16:
-            # Maxpool_2d not implemented for FP16 apparently
             heatmap_to_extract_from = heatmap.float()
         else:
             heatmap_to_extract_from = heatmap
 
+        # Use optimal threshold if available, otherwise use default
+        threshold = getattr(self, 'optimal_threshold', 0.01)
+        
         keypoints, scores = get_keypoints_from_heatmap_batch_maxpool(
-            heatmap_to_extract_from, self.max_keypoints, self.minimal_keypoint_pixel_distance, return_scores=True
+            heatmap_to_extract_from, 
+            self.max_keypoints, 
+            self.minimal_keypoint_pixel_distance, 
+            abs_max_threshold=threshold,
+            return_scores=True
         )
+        
         detected_keypoints = [
-            [[] for _ in range(heatmap_to_extract_from.shape[1])] for _ in range(heatmap_to_extract_from.shape[0])
+            [[] for _ in range(heatmap_to_extract_from.shape[1])] 
+            for _ in range(heatmap_to_extract_from.shape[0])
         ]
+        
         for batch_idx in range(len(detected_keypoints)):
             for channel_idx in range(len(detected_keypoints[batch_idx])):
                 for kp_idx in range(len(keypoints[batch_idx][channel_idx])):
@@ -501,3 +723,60 @@ class KeypointDetector(pl.LightningModule):
                     )
 
         return detected_keypoints
+    
+    # Add to hyperparameters saving
+    def on_save_checkpoint(self, checkpoint):
+        """
+        Save optimal threshold and related metrics in checkpoint
+        """
+        checkpoint['optimal_threshold'] = self.optimal_threshold
+        checkpoint['best_validation_map'] = self.best_validation_map
+        
+    def on_load_checkpoint(self, checkpoint):
+        """
+        Load optimal threshold from checkpoint
+        """
+        if 'optimal_threshold' in checkpoint:
+            self.optimal_threshold = checkpoint['optimal_threshold']
+            print(f"# Loaded optimal threshold from checkpoint: {self.optimal_threshold:.6f}")
+        if 'best_validation_map' in checkpoint:
+            self.best_validation_map = checkpoint['best_validation_map']
+
+    @staticmethod
+    def add_threshold_optimization_args(parent_parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """
+        Add threshold optimization arguments to argparse
+        Call this in your add_model_argparse_args method
+        """
+        parser = parent_parser.add_argument_group("ThresholdOptimization")
+        parser.add_argument(
+            "--enable_threshold_optimization",
+            action="store_true",
+            default=True,
+            help="Enable dynamic threshold optimization during validation"
+        )
+        parser.add_argument(
+            "--disable_threshold_optimization",
+            action="store_false",
+            dest="enable_threshold_optimization", 
+            help="Disable dynamic threshold optimization"
+        )
+        parser.add_argument(
+            "--threshold_search_low",
+            type=float,
+            default=0.0001,
+            help="Lower bound for threshold search"
+        )
+        parser.add_argument(
+            "--threshold_search_high", 
+            type=float,
+            default=0.9,
+            help="Upper bound for threshold search"
+        )
+        parser.add_argument(
+            "--threshold_search_tolerance",
+            type=float,
+            default=1e-4,
+            help="Tolerance for threshold search convergence"
+        )
+        return parent_parser
