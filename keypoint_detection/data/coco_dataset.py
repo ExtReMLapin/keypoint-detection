@@ -5,6 +5,7 @@ import typing
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple
+import cv2
 
 import albumentations as A
 import torch
@@ -132,8 +133,9 @@ class COCOKeypointsDataset(ImageDataset):
         y_ratio = new_height / image.shape[0]
         
         # Resize image
-        image = A.resize(image, (new_height, new_width), interpolation=1)
-
+        #image = A.resize(image, (new_height, new_width), interpolation=1)
+        #resize using opencv
+        image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
             
         #we need to add padding to have a square image, will be used for collate_fn, original image will be placed at top left so we don't have to deal with padding in the heatmap generation
         black_background = np.zeros((self.max_image_size, self.max_image_size, 3), dtype=np.uint8)
