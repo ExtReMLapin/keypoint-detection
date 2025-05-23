@@ -5,6 +5,7 @@ import os
 
 import pytorch_lightning as pl
 import wandb
+import torch
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer.trainer import Trainer
 
@@ -15,7 +16,31 @@ from keypoint_detection.tasks.train_utils import create_pl_trainer, parse_channe
 from keypoint_detection.utils.load_checkpoints import get_model_from_wandb_checkpoint
 from keypoint_detection.utils.path import get_wandb_log_dir_path, get_artifact_dir_path
 
+def add_trainer_args(parser):
+    """Add trainer-specific arguments to the parser."""
+    trainer_group = parser.add_argument_group("Trainer")
 
+    # Core training arguments
+    trainer_group.add_argument("--max_epochs", type=int, default=100)
+    trainer_group.add_argument("--min_epochs", type=int, default=1)
+
+    # Hardware/performance
+    trainer_group.add_argument("--accelerator", type=str, default="auto")
+    trainer_group.add_argument("--devices", type=str, default="auto")
+    trainer_group.add_argument("--precision", type=str, default="32-true")
+
+    # Validation settings
+    trainer_group.add_argument("--check_val_every_n_epoch", type=int, default=1)
+    trainer_group.add_argument("--val_check_interval", type=float, default=1.0)
+
+    # Checkpointing
+    trainer_group.add_argument("--enable_checkpointing", action="store_true", default=True)
+
+    # Logging
+    trainer_group.add_argument("--log_every_n_steps", type=int, default=50)
+    trainer_group.add_argument("--enable_progress_bar", action="store_true", default=True)
+
+    return parser
 def add_system_args(parent_parser: ArgumentParser) -> ArgumentParser:
     """
     function that adds all system configuration (hyper)parameters to the provided argumentparser
@@ -76,7 +101,6 @@ def train(hparams: dict) -> Tuple[KeypointDetector, pl.Trainer]:
 
     # use deterministic algorithms for torch to ensure exact reproducibility
     # we have to set it in the trainer! (see create_pl_trainer)
-
     if hparams["wandb_checkpoint_artifact"] is not None:
         print("Loading checkpoint from wandb")
         # This will create a KeypointDetector model with the associated hyperparameters.
@@ -100,7 +124,9 @@ def train(hparams: dict) -> Tuple[KeypointDetector, pl.Trainer]:
         # not suitable for expensive training runs where you might want to restart from checkpoint
         # but this saves storage and usually keypoint detector training runs are not that expensive anyway
     )
+    hparams['strategy'] = "ddp_find_unused_parameters_true" if int(hparams["devices"]) > 1 else None
     trainer = create_pl_trainer(hparams, wandb_logger)
+    model = torch.compile(model)
     trainer.fit(model, data_module)
 
     if "json_test_dataset_path" in hparams:
@@ -120,7 +146,7 @@ def train(hparams: dict) -> Tuple[KeypointDetector, pl.Trainer]:
 
     return model, trainer
 
-
+import torch.distributed as dist
 def train_cli():
     """
     1. creates argumentparser with Model, Trainer and system paramaters; which can be used to overwrite default parameters
@@ -134,7 +160,7 @@ def train_cli():
     parser = ArgumentParser()
     parser = add_system_args(parser)
     parser = KeypointDetector.add_model_argparse_args(parser)
-    parser = Trainer.add_argparse_args(parser)
+    parser = add_trainer_args(parser)
     parser = KeypointsDataModule.add_argparse_args(parser)
     parser = BackboneFactory.add_to_argparse(parser)
 
@@ -150,16 +176,23 @@ def train_cli():
     # with sweeps, wandb will send hyperparameters to the current agent after the init
     # these can then be found in the 'config'
     # (so wandb params > argparse)
-    wandb.init(
-        name=hparams["wandb_name"],
-        project=hparams["wandb_project"],
-        entity=hparams["wandb_entity"],
-        config=hparams,
-        dir=os.environ["WANDB_DIR"],
-    )
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if local_rank == 0:
+        wandb.init(
+            name=hparams["wandb_name"],
+            project=hparams["wandb_project"],
+            entity=hparams["wandb_entity"],
+            config=hparams,
+            dir=os.environ["WANDB_DIR"],
+        )
+    else:
+        # For other ranks, set to offline mode
+        os.environ["WANDB_MODE"] = "disabled"
+        wandb.init(mode="disabled")
 
     # get (possibly updated by sweep) config parameters
-    hparams = wandb.config
+    #hparams = wandb.config
+    hparams = {**hparams, **wandb.config}
     print(f" config after wandb init: {hparams}")
 
     print("starting training")
