@@ -126,7 +126,7 @@ def train(hparams: dict) -> Tuple[KeypointDetector, pl.Trainer]:
     )
     hparams['strategy'] = "ddp_find_unused_parameters_true" if int(hparams["devices"]) > 1 else None
     trainer = create_pl_trainer(hparams, wandb_logger)
-    model = torch.compile(model)
+    #model = torch.compile(model)
     trainer.fit(model, data_module)
 
     if "json_test_dataset_path" in hparams:
@@ -200,23 +200,4 @@ def train_cli():
 
 
 if __name__ == "__main__":
-    import sys
-    original_args = sys.argv.copy()
-    debug_args = [
-        sys.argv[0],  # Keep the script name
-        "--keypoint_channel_configuration", "minutiae",
-        "--json_dataset_path", "./dataset/Lucboyer_new_keypoints_dataset_train_keypoints.json",
-        "--json_validation_dataset_path", "./dataset/Lucboyer_new_keypoints_dataset_valid_keypoints.json",
-        "--batch_size", "1",
-        "--wandb_project", "minutia-keypoints",
-        "--max_epochs", "100",
-        "--backbone_type", "MaxVitUnet",
-        "--learning_rate", "3e-4",
-        "--accelerator", "gpu",
-        "--devices", "3",
-        "--precision", "16",
-        "--augment_train",
-        "--max_image_size", "512"
-    ]
-    sys.argv = debug_args
     train_cli()
