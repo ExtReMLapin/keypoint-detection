@@ -9,7 +9,7 @@ from keypoint_detection.models.backbones.maxvit_unet import MaxVitPicoUnet, MaxV
 from keypoint_detection.models.backbones.mobilenetv3 import MobileNetV3
 from keypoint_detection.models.backbones.s3k import S3K
 from keypoint_detection.models.backbones.unet import Unet
-from keypoint_detection.models.backbones.coarsenet import CoarseNetBackbone
+from keypoint_detection.models.backbones.coarsenet import CoarseNetBackbone, CoarseNetBackboneImproved
 
 
 
@@ -27,6 +27,7 @@ class BackboneFactory:
         MobileNetV3,
         DinoV2Up,
         CoarseNetBackbone,
+        CoarseNetBackboneImproved
     ]
 
     @staticmethod
