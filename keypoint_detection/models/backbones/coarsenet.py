@@ -174,7 +174,7 @@ class CoarseNetBackboneImproved(Backbone):
     """
     
     def __init__(self, n_channels=64, n_residual_blocks=3, **kwargs):
-        super(CoarseNetBackbone, self).__init__()
+        super(CoarseNetBackboneImproved, self).__init__()
         
         self.n_channels = n_channels
         input_channels = 3  # Standard RGB images
@@ -269,9 +269,3 @@ class CoarseNetBackboneImproved(Backbone):
     def get_n_channels_out(self):
         return self.n_channels * 4
     
-    @staticmethod
-    def add_to_argparse(parent_parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        parser = parent_parser.add_argument_group("CoarseNetBackbone")
-        parser.add_argument("--n_channels_coarse", dest="n_channels", type=int, default=64)
-        parser.add_argument("--n_residual_blocks_coarse", dest="n_residual_blocks", type=int, default=3)
-        return parent_parser
