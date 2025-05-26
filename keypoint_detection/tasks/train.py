@@ -124,7 +124,7 @@ def train(hparams: dict) -> Tuple[KeypointDetector, pl.Trainer]:
         # not suitable for expensive training runs where you might want to restart from checkpoint
         # but this saves storage and usually keypoint detector training runs are not that expensive anyway
     )
-    hparams['strategy'] = "ddp_find_unused_parameters_true" if int(hparams["devices"]) > 1 else None
+    hparams['strategy'] = "ddp_find_unused_parameters_true" if int(hparams["devices"]) > 1 else "auto"
     trainer = create_pl_trainer(hparams, wandb_logger)
     #model = torch.compile(model)
     trainer.fit(model, data_module)
@@ -192,9 +192,7 @@ def train_cli():
     # get (possibly updated by sweep) config parameters
     #hparams = wandb.config
     hparams = {**hparams, **wandb.config}
-    print(f" config after wandb init: {hparams}")
 
-    print("starting training")
     train(hparams)
 
 

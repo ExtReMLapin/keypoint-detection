@@ -706,9 +706,9 @@ class KeypointDetector(pl.LightningModule):
                 self.validation_heatmaps.clear()
                 self.validation_gt_keypoints.clear()
             
-            elif self.is_ap_epoch() and not self.enable_threshold_optimization:
-                # Use old method if threshold optimization is disabled
-                self.update_ap_metrics(result_dict, self.ap_validation_metrics)
+            #elif self.is_ap_epoch() and not self.enable_threshold_optimization:
+            #    # Use old method if threshold optimization is disabled
+            #    self.update_ap_metrics(result_dict, self.ap_validation_metrics)
 
         # Log final metrics (works for both optimized and non-optimized cases)
         self.log_and_reset_mean_ap("validation")
@@ -757,7 +757,7 @@ class KeypointDetector(pl.LightningModule):
         
         return optimal_threshold, best_map
 
-    def test_epoch_end(self, outputs):
+    def on_test_epoch_end(self):
         """
         Called on the end of a test epoch.
         Used to compute and log the AP metrics.
@@ -885,7 +885,7 @@ class KeypointDetector(pl.LightningModule):
         parser.add_argument(
             "--enable_threshold_optimization",
             action="store_true",
-            default=True,
+            default=False,
             help="Enable dynamic threshold optimization during validation"
         )
         parser.add_argument(
