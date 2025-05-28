@@ -94,6 +94,7 @@ def create_pl_trainer(hparams: dict, wandb_logger: WandbLogger) -> Trainer:
     )
 
     trainer = pl.Trainer(**trainer_kwargs, callbacks=[early_stopping, checkpoint_callback], accumulate_grad_batches=5)
+
     return trainer
 
 
