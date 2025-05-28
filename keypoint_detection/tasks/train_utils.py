@@ -93,7 +93,7 @@ def create_pl_trainer(hparams: dict, wandb_logger: WandbLogger) -> Trainer:
         monitor="checkpointing_metrics/valmeanAP", mode="max", save_weights_only=True, save_top_k=1
     )
 
-    trainer = pl.Trainer(**trainer_kwargs, callbacks=[early_stopping, checkpoint_callback], strategy=DDPStrategy(find_unused_parameters=False, static_graph=True))
+    trainer = pl.Trainer(**trainer_kwargs, callbacks=[early_stopping, checkpoint_callback])
     return trainer
 
 

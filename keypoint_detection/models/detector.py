@@ -8,7 +8,7 @@ import wandb
 
 from keypoint_detection.models.backbones.base_backbone import Backbone
 from keypoint_detection.models.metrics import DetectedKeypoint, Keypoint, KeypointAPMetrics
-from keypoint_detection.utils.heatmap import BCE_loss, create_heatmap_batch, get_keypoints_from_heatmap_batch_maxpool
+from keypoint_detection.utils.heatmap import BCE_loss, create_heatmap_batch, get_keypoints_from_heatmap_batch_maxpool, focal_loss_with_logits, adaptive_focal_loss_with_logits
 from keypoint_detection.utils.visualization import (
     get_logging_label_from_channel_configuration,
     visualize_predicted_heatmaps,
@@ -99,6 +99,10 @@ class KeypointDetector(pl.LightningModule):
         threshold_coarse_steps: int = 20,
         threshold_fine_steps: int = 10,
         threshold_batch_size: int = 16,
+        use_focal_loss: bool = False,
+        focal_loss_alpha: float = 0.25,
+        focal_loss_gamma: float = 2.0,
+        use_adaptive_focal_loss: bool = False,
         **kwargs,
     ):
         """[summary]
@@ -168,7 +172,7 @@ class KeypointDetector(pl.LightningModule):
         # save hyperparameters to logger, to make sure the model hparams are saved even if
         # they are not included in the config (i.e. if they are kept at the defaults).
         # this is for later reference (e.g. checkpoint loading) and consistency.
-        self.save_hyperparameters(ignore=["**kwargs", "backbone"])
+        
 
         self._most_recent_val_mean_ap = 0.0  # used to store the most recent validation mean AP and log it in each epoch, so that checkpoint can be chosen based on this one.
 
@@ -189,6 +193,11 @@ class KeypointDetector(pl.LightningModule):
         self.threshold_coarse_steps = threshold_coarse_steps
         self.threshold_fine_steps = threshold_fine_steps
         self.threshold_batch_size = threshold_batch_size
+        self.use_focal_loss = use_focal_loss
+        self.focal_loss_alpha = focal_loss_alpha
+        self.focal_loss_gamma = focal_loss_gamma
+        self.use_adaptive_focal_loss = use_adaptive_focal_loss
+        self.save_hyperparameters(ignore=["**kwargs", "backbone"])
 
     def forward(self, x: torch.Tensor):
         """
@@ -254,12 +263,29 @@ class KeypointDetector(pl.LightningModule):
 
         result_dict = {}
         for channel_idx in range(len(self.keypoint_channel_configuration)):
-            channel_losses.append(
-                # combines sigmoid with BCE for increased stability.
-                nn.functional.binary_cross_entropy_with_logits(
-                    predicted_unnormalized_maps[:, channel_idx, :, :], gt_heatmaps[channel_idx]
+            if self.use_focal_loss:
+                if self.use_adaptive_focal_loss:
+                    loss_fn = adaptive_focal_loss_with_logits
+                else:
+                    loss_fn = focal_loss_with_logits
+                
+                channel_losses.append(
+                    loss_fn(
+                        predicted_unnormalized_maps[:, channel_idx, :, :], 
+                        gt_heatmaps[channel_idx],
+                        alpha=self.focal_loss_alpha,
+                        gamma=self.focal_loss_gamma
+                    )
                 )
-            )
+            else:
+                # Original BCE loss
+                channel_losses.append(
+                    nn.functional.binary_cross_entropy_with_logits(
+                        predicted_unnormalized_maps[:, channel_idx, :, :], 
+                        gt_heatmaps[channel_idx]
+                    )
+                )
+            
             with torch.no_grad():
                 channel_gt_losses.append(BCE_loss(gt_heatmaps[channel_idx], gt_heatmaps[channel_idx]))
 
@@ -946,6 +972,31 @@ class KeypointDetector(pl.LightningModule):
             type=float,
             default=1e-4,
             help="Tolerance for ternary search convergence (only used with --threshold_optimization_method ternary)"
+        )
+        
+        parser.add_argument(
+            "--use_focal_loss",
+            action="store_true",
+            default=False,
+            help="Use focal loss instead of binary cross-entropy. Recommended for imbalanced datasets like minutiae detection."
+        )
+        parser.add_argument(
+            "--focal_loss_alpha",
+            type=float,
+            default=0.25,
+            help="Alpha parameter for focal loss. Controls class weighting. 0.25 means 25%% weight for positive class."
+        )
+        parser.add_argument(
+            "--focal_loss_gamma",
+            type=float,
+            default=2.0,
+            help="Gamma parameter for focal loss. Controls focusing on hard examples. Higher values focus more on hard examples."
+        )
+        parser.add_argument(
+            "--use_adaptive_focal_loss",
+            action="store_true",
+            default=False,
+            help="Use adaptive focal loss that adjusts alpha based on batch statistics."
         )
         return parent_parser
         
