@@ -196,11 +196,6 @@ class KeypointDetector(pl.LightningModule):
         
 
         self._most_recent_val_mean_ap = 0.0  # used to store the most recent validation mean AP and log it in each epoch, so that checkpoint can be chosen based on this one.
-
-        # For storing validation data during epoch
-        self.validation_heatmaps = []
-        self.validation_gt_keypoints = []
-        
         
         self.use_focal_loss = use_focal_loss
         self.focal_loss_alpha = focal_loss_alpha
@@ -465,7 +460,7 @@ class KeypointDetector(pl.LightningModule):
             self.logger.experiment.log({label: wandb.Image(grid, caption=image_caption)})
 
     def validation_step(self, val_batch, batch_idx):
-        # Your existing validation_step code, but add data collection
+        # no need to switch model to eval mode, this is handled by pytorch lightning
         result_dict = self.shared_step(val_batch, batch_idx, include_visualization_data_in_result_dict=True)
 
         if self.is_ap_epoch():
