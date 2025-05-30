@@ -467,14 +467,15 @@ class KeypointDetector(pl.LightningModule):
     def validation_step(self, val_batch, batch_idx):
         # Your existing validation_step code, but add data collection
         result_dict = self.shared_step(val_batch, batch_idx, include_visualization_data_in_result_dict=True)
-        
-        log_images = batch_idx == 0 and self.current_epoch > 0
-        if log_images and isinstance(self.logger, pl.loggers.wandb.WandbLogger):
-            channel_grids = self.visualize_predictions_channels(result_dict)
-            self.log_channel_predictions_grids(channel_grids, mode="validation")
-            
-            keypoint_grids = self.visualize_predicted_keypoints(result_dict)
-            self.log_predicted_keypoints(keypoint_grids, mode="validation")
+
+        if self.is_ap_epoch():
+            log_images = batch_idx == 0 and self.current_epoch > 0
+            if log_images and isinstance(self.logger, pl.loggers.wandb.WandbLogger):
+                channel_grids = self.visualize_predictions_channels(result_dict)
+                self.log_channel_predictions_grids(channel_grids, mode="validation")
+                
+                keypoint_grids = self.visualize_predicted_keypoints(result_dict)
+                self.log_predicted_keypoints(keypoint_grids, mode="validation")
         
         self.log("validation/epoch_loss", result_dict["loss"], sync_dist=True)
         self.log("validation/gt_loss", result_dict["gt_loss"], sync_dist=True)
@@ -541,7 +542,8 @@ class KeypointDetector(pl.LightningModule):
     # Updated on_validation_epoch_end method
     def on_validation_epoch_end(self):
         """
-        Optimized validation_epoch_end with faster threshold optimization
+        Called on the end of a validation epoch.
+        Used to compute and log the AP metrics.
         """
         if self.is_ap_epoch():
             self.log_and_reset_mean_ap("validation")
@@ -622,7 +624,6 @@ class KeypointDetector(pl.LightningModule):
         else:
             heatmap_to_extract_from = heatmap
 
-        # Use optimal threshold if available, otherwise use default
         
         keypoints, scores = get_keypoints_from_heatmap_batch_maxpool(
             heatmap_to_extract_from, self.max_keypoints, self.minimal_keypoint_pixel_distance, return_scores=True

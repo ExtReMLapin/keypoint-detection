@@ -146,7 +146,6 @@ def train(hparams: dict) -> Tuple[KeypointDetector, pl.Trainer]:
 
     return model, trainer
 
-import torch.distributed as dist
 def train_cli():
     """
     1. creates argumentparser with Model, Trainer and system paramaters; which can be used to overwrite default parameters
