@@ -11,7 +11,7 @@ setup(
     install_requires=[
         "torch>=0.10",
         "torchvision>=0.11",
-        "pytorch-lightning",  # PL 2.0 has breaking changes that need to be incorporated
+        "pytorch-lightning",
         "torchmetrics>=0.7",
         "wandb>=0.13.7",  # artifact bug https://github.com/wandb/wandb/issues/4500
         "timm>=0.9",  # 0.9 has breaking changes
