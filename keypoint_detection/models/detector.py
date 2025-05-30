@@ -464,6 +464,8 @@ class KeypointDetector(pl.LightningModule):
         result_dict = self.shared_step(val_batch, batch_idx, include_visualization_data_in_result_dict=True)
 
         if self.is_ap_epoch():
+            self.update_ap_metrics(result_dict, self.ap_validation_metrics)
+            
             log_images = batch_idx == 0 and self.current_epoch > 0
             if log_images and isinstance(self.logger, pl.loggers.wandb.WandbLogger):
                 channel_grids = self.visualize_predictions_channels(result_dict)
