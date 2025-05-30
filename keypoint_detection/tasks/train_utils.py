@@ -9,7 +9,7 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
 from keypoint_detection.utils.path import get_artifact_dir_path
-from pytorch_lightning.strategies import DDPStrategy
+
 
 
 class RelativeEarlyStopping(EarlyStopping):
@@ -93,7 +93,8 @@ def create_pl_trainer(hparams: dict, wandb_logger: WandbLogger) -> Trainer:
         monitor="checkpointing_metrics/valmeanAP", mode="max", save_weights_only=True, save_top_k=1
     )
 
-    trainer = pl.Trainer(**trainer_kwargs, callbacks=[early_stopping, checkpoint_callback])
+    trainer = pl.Trainer(**trainer_kwargs, callbacks=[early_stopping, checkpoint_callback], accumulate_grad_batches=5)
+
     return trainer
 
 

@@ -126,7 +126,7 @@ def train(hparams: dict) -> Tuple[KeypointDetector, pl.Trainer]:
     )
     hparams['strategy'] = "ddp_find_unused_parameters_false" if int(hparams["devices"]) > 1 else "auto"
     trainer = create_pl_trainer(hparams, wandb_logger)
-    model = torch.compile(model)
+    #model = torch.compile(model)
     trainer.fit(model, data_module)
 
     if "json_test_dataset_path" in hparams:
