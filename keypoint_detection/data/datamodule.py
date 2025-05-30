@@ -96,7 +96,9 @@ class KeypointsDataModule(pl.LightningDataModule):
                     ),
                     A.GaussianBlur(p=0.2, blur_limit=(3, 3)),
                     A.Sharpen(p=0.2),
-                    A.RandomRotate90(p=0.5),
+                    A.Rotate(
+                        limit=(-180, 180),  p=0.5
+                    ),
                     A.Transpose(p=0.5),
                     A.HorizontalFlip(p=0.5),
                     A.VerticalFlip(p=0.5),
