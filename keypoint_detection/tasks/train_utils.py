@@ -93,7 +93,7 @@ def create_pl_trainer(hparams: dict, wandb_logger: WandbLogger) -> Trainer:
         monitor="checkpointing_metrics/valmeanAP", mode="max", save_weights_only=True, save_top_k=1
     )
 
-    trainer = pl.Trainer(**trainer_kwargs, callbacks=[early_stopping, checkpoint_callback], accumulate_grad_batches=5)
+    trainer = pl.Trainer(**trainer_kwargs, callbacks=[early_stopping, checkpoint_callback])
 
     return trainer
 

@@ -76,6 +76,32 @@ class KeypointDetector(pl.LightningModule):
             help="the maximum number of keypoints to predict from the generated heatmaps. If set to -1, skimage will look for all peaks in the heatmap, if set to N (N>0) it will return the N most most certain ones.",
         )
         
+        parser.add_argument(
+            "--lr_scheduler", 
+            type=str, 
+            choices=["none", "cosine", "onecycle", "step", "plateau"],
+            default="cosine",
+            help="Learning rate scheduler type"
+        )
+        parser.add_argument(
+            "--lr_warmup_epochs", 
+            type=int, 
+            default=10,
+            help="Number of warmup epochs for cosine/onecycle schedulers"
+        )
+        parser.add_argument(
+            "--lr_step_milestones", 
+            type=str, 
+            default="150,250,350",
+            help="Comma-separated epochs for step scheduler"
+        )
+        parser.add_argument(
+            "--lr_step_gamma", 
+            type=float, 
+            default=0.1,
+            help="LR decay factor for step scheduler"
+        )
+        
         parent_parser = KeypointDetector.add_threshold_optimization_args(parent_parser)
         return parent_parser
 
@@ -122,7 +148,10 @@ class KeypointDetector(pl.LightningModule):
         # 1. define as named arg in the init (and use them)
         # 2. add to the argparse method of this module
         # 3. pass them along when calling the train.py file to override their default value
-
+        self.lr_scheduler = kwargs.get('lr_scheduler', 'cosine')
+        self.lr_warmup_epochs = kwargs.get('lr_warmup_epochs', 10)
+        self.lr_step_milestones = kwargs.get('lr_step_milestones', '150,250,350')
+        self.lr_step_gamma = kwargs.get('lr_step_gamma', 0.1)
         self.learning_rate = learning_rate
         self.heatmap_sigma = heatmap_sigma
         self.ap_epoch_start = ap_epoch_start
@@ -215,22 +244,95 @@ class KeypointDetector(pl.LightningModule):
         """
         self.optimizer = torch.optim.Adam(self.parameters(), self.learning_rate)
 
-        # TODO: the LR scheduler can reduce training robustness for smaller datasets (where the val loss might fluctuate more),
-        # this makes the impact of a random seed larger. So for now, we disable it.
-        # solution would be to limit the dependency of the scheduler on the dataset size, e.g. by coupling it to the number of model updates instead of epochs.
-
-        # self.lr_scheduler = ReduceLROnPlateau(
-        #     self.optimizer,
-        #     threshold=self.lr_scheduler_relative_threshold,
-        #     threshold_mode="rel",
-        #     mode="min",
-        #     factor=0.1,
-        #     patience=2,
-        #     verbose=True,
-        # )
-        return {
-            "optimizer": self.optimizer,
-        }
+        if self.lr_scheduler == "none":
+                return {"optimizer": self.optimizer}
+            
+        elif self.lr_scheduler == "cosine":
+            # Cosine annealing - excellent for long training runs
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=self.trainer.max_epochs - self.lr_warmup_epochs,
+                eta_min=self.learning_rate * 0.01  # End at 1% of initial LR
+            )
+            
+            if self.lr_warmup_epochs > 0:
+                # Add warmup
+                warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                    self.optimizer,
+                    start_factor=0.1,  # Start at 10% of LR
+                    total_iters=self.lr_warmup_epochs
+                )
+                scheduler = torch.optim.lr_scheduler.SequentialLR(
+                    self.optimizer,
+                    schedulers=[warmup_scheduler, scheduler],
+                    milestones=[self.lr_warmup_epochs]
+                )
+            
+            return {
+                "optimizer": self.optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "epoch"
+                }
+            }
+        
+        elif self.lr_scheduler == "onecycle":
+            # OneCycleLR - very effective for training from scratch
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                self.optimizer,
+                max_lr=self.learning_rate * 3,  # Peak at 3x base LR
+                epochs=self.trainer.max_epochs,
+                steps_per_epoch=len(self.trainer.datamodule.train_dataloader()),
+                pct_start=0.3,  # 30% warmup, 70% decay
+                anneal_strategy='cos'
+            )
+            
+            return {
+                "optimizer": self.optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step"  # OneCycle needs step-wise updates
+                }
+            }
+        
+        elif self.lr_scheduler == "step":
+            # Step decay at specific epochs
+            milestones = [int(x) for x in self.lr_step_milestones.split(",")]
+            scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                self.optimizer,
+                milestones=milestones,
+                gamma=self.lr_step_gamma
+            )
+            
+            return {
+                "optimizer": self.optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "epoch"
+                }
+            }
+        
+        elif self.lr_scheduler == "plateau":
+            # Reduce on plateau - good for validation-driven training
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                factor=0.5,
+                patience=15,  # More patience for small datasets
+                threshold=0.01,
+                threshold_mode='rel',
+                verbose=True,
+                min_lr=self.learning_rate * 0.01
+            )
+            
+            return {
+                "optimizer": self.optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "monitor": "validation/epoch_loss",  # Monitor validation loss
+                    "interval": "epoch"
+                }
+            }
 
     def shared_step(self, batch, batch_idx, include_visualization_data_in_result_dict=False) -> Dict[str, Any]:
         """
