@@ -255,7 +255,7 @@ def get_keypoints_from_heatmap_batch_maxpool(
     filtered_indices = [[[] for _ in range(n_channels)] for _ in range(batch_size)]
     filtered_scores = [[[] for _ in range(n_channels)] for _ in range(batch_size)]
     # determine NMS threshold
-    threshold = 0.1  # make sure it is > 0 to filter out top-k that are not local maxima
+    threshold = 0.01  # make sure it is > 0 to filter out top-k that are not local maxima
     if abs_max_threshold is not None:
         threshold = max(threshold, abs_max_threshold)
     if rel_max_threshold is not None:
