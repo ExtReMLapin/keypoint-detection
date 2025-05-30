@@ -117,14 +117,6 @@ class KeypointDetector(pl.LightningModule):
         ap_epoch_freq: int,
         lr_scheduler_relative_threshold: float,
         max_keypoints: int,
-        enable_threshold_optimization:bool,
-        threshold_search_low:float,
-        threshold_search_high:float,
-        threshold_search_tolerance:float,
-        threshold_optimization_method: str = "optimized",
-        threshold_coarse_steps: int = 20,
-        threshold_fine_steps: int = 10,
-        threshold_batch_size: int = 16,
         use_focal_loss: bool = False,
         focal_loss_alpha: float = 0.25,
         focal_loss_gamma: float = 2.0,
@@ -209,19 +201,7 @@ class KeypointDetector(pl.LightningModule):
         self.validation_heatmaps = []
         self.validation_gt_keypoints = []
         
-        # Optimal threshold found during validation
-        self.optimal_threshold = 0.01  # Default threshold
-        self.best_validation_map = 0.0
         
-        # Threshold optimization parameters (can be made configurable via argparse)
-        self.enable_threshold_optimization = enable_threshold_optimization
-        self.threshold_search_low = threshold_search_low
-        self.threshold_search_high = threshold_search_high
-        self.threshold_search_tolerance = threshold_search_tolerance
-        self.threshold_optimization_method = threshold_optimization_method
-        self.threshold_coarse_steps = threshold_coarse_steps
-        self.threshold_fine_steps = threshold_fine_steps
-        self.threshold_batch_size = threshold_batch_size
         self.use_focal_loss = use_focal_loss
         self.focal_loss_alpha = focal_loss_alpha
         self.focal_loss_gamma = focal_loss_gamma
@@ -472,7 +452,7 @@ class KeypointDetector(pl.LightningModule):
         # get the keypoints from the heatmaps
         predicted_heatmaps = predicted_heatmaps.detach().float()
         predicted_keypoints = get_keypoints_from_heatmap_batch_maxpool(
-            predicted_heatmaps, self.max_keypoints, self.minimal_keypoint_pixel_distance, abs_max_threshold=0.005
+            predicted_heatmaps, self.max_keypoints, self.minimal_keypoint_pixel_distance, abs_max_threshold=0.1
         )
         # overlay the images with the keypoints
         grid = visualize_predicted_keypoints(images, predicted_keypoints, self.keypoint_channel_configuration)
@@ -488,156 +468,17 @@ class KeypointDetector(pl.LightningModule):
         # Your existing validation_step code, but add data collection
         result_dict = self.shared_step(val_batch, batch_idx, include_visualization_data_in_result_dict=True)
         
-        if self.is_ap_epoch() and self.enable_threshold_optimization:
-            # Store data for threshold optimization
-            predicted_heatmaps = result_dict["predicted_heatmaps"].detach().cpu()
-            gt_keypoints = result_dict["gt_keypoints"]
+        log_images = batch_idx == 0 and self.current_epoch > 0
+        if log_images and isinstance(self.logger, pl.loggers.wandb.WandbLogger):
+            channel_grids = self.visualize_predictions_channels(result_dict)
+            self.log_channel_predictions_grids(channel_grids, mode="validation")
             
-            # Store each sample in the batch separately for easier indexing later
-            for sample_idx in range(predicted_heatmaps.shape[0]):
-                self.validation_heatmaps.append(predicted_heatmaps[sample_idx:sample_idx+1])
-                # Reorganize gt_keypoints: from [channel][batch_sample] to [sample][channel]
-                sample_gt_keypoints = []
-                for channel_idx in range(len(gt_keypoints)):
-                    if sample_idx < len(gt_keypoints[channel_idx]):
-                        sample_gt_keypoints.append(gt_keypoints[channel_idx][sample_idx])
-                    else:
-                        sample_gt_keypoints.append(torch.tensor([]))
-                self.validation_gt_keypoints.append(sample_gt_keypoints)
-            
-            log_images = batch_idx == 0 and self.current_epoch > 0
-            if log_images and isinstance(self.logger, pl.loggers.wandb.WandbLogger):
-                channel_grids = self.visualize_predictions_channels(result_dict)
-                self.log_channel_predictions_grids(channel_grids, mode="validation")
-                
-                keypoint_grids = self.visualize_predicted_keypoints(result_dict)
-                self.log_predicted_keypoints(keypoint_grids, mode="validation")
-        
-        elif self.is_ap_epoch() and not self.enable_threshold_optimization:
-            # Use old method if threshold optimization is disabled
-            self.update_ap_metrics(result_dict, self.ap_validation_metrics)
             keypoint_grids = self.visualize_predicted_keypoints(result_dict)
             self.log_predicted_keypoints(keypoint_grids, mode="validation")
-
+        
         self.log("validation/epoch_loss", result_dict["loss"], sync_dist=True)
         self.log("validation/gt_loss", result_dict["gt_loss"], sync_dist=True)
 
-
-    def ternary_search_optimal_threshold(
-        self, 
-        heatmaps: List[torch.Tensor], 
-        gt_keypoints: List[List], 
-        low: float = None, 
-        high: float = None, 
-        tolerance: float = None
-    ) -> Tuple[float, float]:
-        """
-        Use ternary search to find the threshold that maximizes mAP.
-        
-        Args:
-            heatmaps: List of validation heatmaps (one per sample)
-            gt_keypoints: List of GT keypoints per sample [sample][channel][keypoint_list]
-            low: Lower bound for threshold search
-            high: Upper bound for threshold search  
-            tolerance: Search tolerance
-            
-        Returns:
-            (optimal_threshold, best_map)
-        """
-        
-        # Use instance parameters if not provided
-        if low is None:
-            low = self.threshold_search_low
-        if high is None:
-            high = self.threshold_search_high
-        if tolerance is None:
-            tolerance = self.threshold_search_tolerance
-        
-        print(f"# Searching optimal threshold in range [{low:.4f}, {high:.4f}] with tolerance {tolerance}")
-        
-        def evaluate_threshold(threshold: float) -> float:
-            """Evaluate mAP for a given threshold"""
-            # Create fresh metrics for this threshold evaluation
-            temp_metrics = [
-                KeypointAPMetrics(self.maximal_gt_keypoint_pixel_distances) 
-                for _ in self.keypoint_channel_configuration
-            ]
-            
-            # Extract keypoints with this threshold for each sample
-            for sample_idx, (sample_heatmap, sample_gt_keypoints) in enumerate(zip(heatmaps, gt_keypoints)):
-                
-                keypoints, scores = get_keypoints_from_heatmap_batch_maxpool(
-                    sample_heatmap.float(),
-                    self.max_keypoints,
-                    self.minimal_keypoint_pixel_distance,
-                    abs_max_threshold=threshold,
-                    return_scores=True
-                )
-                
-                # Update metrics for each channel
-                for channel_idx in range(len(self.keypoint_channel_configuration)):
-                    # Detected keypoints for this channel
-                    detected_keypoints_channel = []
-                    if (channel_idx < len(keypoints[0]) and 
-                        len(keypoints[0][channel_idx]) > 0 and 
-                        len(scores[0][channel_idx]) > 0):
-                        detected_keypoints_channel = [
-                            DetectedKeypoint(int(kp[0]), int(kp[1]), float(score)) 
-                            for kp, score in zip(keypoints[0][channel_idx], scores[0][channel_idx])
-                        ]
-                    
-                    # Ground truth keypoints for this channel
-                    gt_keypoints_channel = []
-                    if (channel_idx < len(sample_gt_keypoints) and 
-                        len(sample_gt_keypoints[channel_idx]) > 0):
-                        gt_keypoints_channel = [
-                            Keypoint(int(k[0]), int(k[1])) 
-                            for k in sample_gt_keypoints[channel_idx]
-                        ]
-                    
-                    temp_metrics[channel_idx].update(detected_keypoints_channel, gt_keypoints_channel)
-            
-            # Compute mean AP across all channels and thresholds
-            total_ap = 0.0
-            total_count = 0
-            
-            for channel_metrics in temp_metrics:
-                channel_aps = channel_metrics.compute()
-                if len(channel_aps) > 0:
-                    total_ap += sum(channel_aps.values())
-                    total_count += len(channel_aps)
-                channel_metrics.reset()
-            
-            mean_ap = total_ap / max(total_count, 1)
-            return mean_ap
-        
-        # Ternary search implementation
-        iteration = 0
-        max_iterations = 50  # Safety limit
-        
-        while high - low > tolerance and iteration < max_iterations:
-            mid1 = low + (high - low) / 3
-            mid2 = high - (high - low) / 3
-            
-            map1 = evaluate_threshold(mid1)
-            map2 = evaluate_threshold(mid2)
-            
-            if iteration % 5 == 0:  # Log progress every 5 iterations
-                print(f"# Iteration {iteration}: [{low:.4f}, {high:.4f}] -> mAP({mid1:.4f})={map1:.4f}, mAP({mid2:.4f})={map2:.4f}")
-            
-            if map1 < map2:
-                low = mid1
-            else:
-                high = mid2
-                
-            iteration += 1
-        
-        optimal_threshold = (low + high) / 2
-        best_map = evaluate_threshold(optimal_threshold)
-        
-        print(f"# Search completed in {iteration} iterations")
-        
-        return optimal_threshold, best_map
 
 
     def test_step(self, test_batch, batch_idx):
@@ -696,53 +537,6 @@ class KeypointDetector(pl.LightningModule):
         if self.is_ap_epoch():
             self.log_and_reset_mean_ap("train")
 
-    # Replace the ternary_search_optimal_threshold method with this optimized version
-    def optimized_threshold_search(
-        self, 
-        heatmaps: List[torch.Tensor], 
-        gt_keypoints: List[List], 
-        low: float = None, 
-        high: float = None
-    ) -> Tuple[float, float]:
-        """
-        Optimized threshold search that's ~10-50x faster than ternary search
-        
-        Args:
-            heatmaps: List of validation heatmaps (one per sample)
-            gt_keypoints: List of GT keypoints per sample [sample][channel][keypoint_list]
-            low: Lower bound for threshold search
-            high: Upper bound for threshold search
-            
-        Returns:
-            (optimal_threshold, best_map)
-        """
-        
-        # Use instance parameters if not provided
-        if low is None:
-            low = self.threshold_search_low
-        if high is None:
-            high = self.threshold_search_high
-        
-        print(f"# Optimized threshold search for {len(heatmaps)} validation samples")
-        
-        # Create optimizer
-        optimizer = OptimizedThresholdSearch(
-            self.maximal_gt_keypoint_pixel_distances,
-            self.max_keypoints,
-            self.minimal_keypoint_pixel_distance
-        )
-        
-        # Pre-extract keypoints once (this is the key optimization)
-        optimizer.extract_all_keypoints_once(heatmaps, gt_keypoints)
-        
-        # Find optimal threshold using two-stage grid search
-        optimal_threshold, best_map = optimizer.grid_search_optimal_threshold(
-            low, high, 
-            num_coarse_steps=20,  # Adjust based on speed/accuracy tradeoff
-            num_fine_steps=10
-        )
-        
-        return optimal_threshold, best_map
 
     # Updated on_validation_epoch_end method
     def on_validation_epoch_end(self):
@@ -847,45 +641,6 @@ class KeypointDetector(pl.LightningModule):
         self.log("checkpointing_metrics/valmeanAP", self._most_recent_val_mean_ap, sync_dist=True)
 
     # For very large datasets, use memory-efficient version
-    def memory_efficient_threshold_search(
-        self, 
-        heatmaps: List[torch.Tensor], 
-        gt_keypoints: List[List], 
-        low: float = None, 
-        high: float = None
-    ) -> Tuple[float, float]:
-        """
-        Memory-efficient version for very large validation sets
-        Uses less memory but still much faster than original ternary search
-        """
-        from keypoint_detection.models.optimized_threshold import MemoryEfficientThresholdSearch
-        
-        if low is None:
-            low = self.threshold_search_low
-        if high is None:
-            high = self.threshold_search_high
-        
-        optimizer = MemoryEfficientThresholdSearch(
-            self.maximal_gt_keypoint_pixel_distances,
-            self.max_keypoints,
-            self.minimal_keypoint_pixel_distance
-        )
-        
-        optimizer.set_validation_data(heatmaps, gt_keypoints)
-        
-        # Use coarser grid for memory efficiency
-        thresholds = np.linspace(low, high, 15)
-        maps = []
-        
-        for threshold in thresholds:
-            map_score = optimizer.evaluate_threshold_on_demand(threshold)
-            maps.append(map_score)
-        
-        best_idx = np.argmax(maps)
-        optimal_threshold = thresholds[best_idx]
-        best_map = maps[best_idx]
-        
-        return optimal_threshold, best_map
 
     def on_test_epoch_end(self):
         """
