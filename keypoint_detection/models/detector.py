@@ -414,6 +414,8 @@ class KeypointDetector(pl.LightningModule):
         elif self.is_ap_epoch() and not self.enable_threshold_optimization:
             # Use old method if threshold optimization is disabled
             self.update_ap_metrics(result_dict, self.ap_validation_metrics)
+            keypoint_grids = self.visualize_predicted_keypoints(result_dict)
+            self.log_predicted_keypoints(keypoint_grids, mode="validation")
 
         self.log("validation/epoch_loss", result_dict["loss"], sync_dist=True)
         self.log("validation/gt_loss", result_dict["gt_loss"], sync_dist=True)
