@@ -109,6 +109,83 @@ class MaxVitLargeUnet(MaxVitUnet):
         {"down": 16, "channels": 512},
         {"down": 32, "channels": 1024},
     ]
+    
+
+class MaxVitTinyTfUnet(Backbone):
+    FEATURE_CONFIG = [
+        {"down": 2,  "channels":  64},  # after stem
+        {"down": 4,  "channels":  64},  # after stage0
+        {"down": 8,  "channels": 128},  # after stage1
+        {"down": 16, "channels": 256},  # after stage2
+        {"down": 32, "channels": 512},  # after stage3
+    ]
+    MODEL_NAME = "maxvit_tiny_tf_512"
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.encoder = timm.create_model(self.MODEL_NAME, pretrained=True, num_classes=0)
+        # decoder setup is unchanged
+        self.decoder_blocks = nn.ModuleList()
+        for skip_cfg, in_cfg in zip(self.FEATURE_CONFIG, self.FEATURE_CONFIG[1:]):
+            block = UpSamplingBlock(
+                in_cfg["channels"],
+                skip_cfg["channels"],
+                skip_cfg["channels"],
+                3,
+            )
+            self.decoder_blocks.append(block)
+
+        self.final_conv = nn.Conv2d(
+            self.FEATURE_CONFIG[0]["channels"],
+            self.FEATURE_CONFIG[0]["channels"],
+            kernel_size=3,
+            padding="same",
+        )
+        self.final_upsampling_block = UpSamplingBlock(
+            self.FEATURE_CONFIG[0]["channels"],
+            3,
+            self.FEATURE_CONFIG[0]["channels"],
+            3,
+        )
+
+    def forward(self, x):
+        orig_x = x
+        # manually extract features instead of FX tracer:
+        # 1) stem
+        f0 = self.encoder.stem(x)            # size: [B,64, H/2,  W/2]
+        # 2) stage0
+        f1 = self.encoder.stages[0](f0)      # [B,64, H/4,  W/4]
+        # 3) stage1
+        f2 = self.encoder.stages[1](f1)      # [B,128,H/8,  W/8]
+        # 4) stage2
+        f3 = self.encoder.stages[2](f2)      # [B,256,H/16, W/16]
+        # 5) stage3
+        f4 = self.encoder.stages[3](f3)      # [B,512,H/32, W/32]
+
+        # now decode in reverse:
+        x = f4
+        skips = [f0, f1, f2, f3]  # aligned with FEATURE_CONFIG
+        for block, skip in zip(reversed(self.decoder_blocks), reversed(skips)):
+            x = block(x, skip)
+
+        # final upsample to full resolution:
+        x = self.final_upsampling_block(x, orig_x)
+        return x
+
+    def get_n_channels_out(self):
+        return self.FEATURE_CONFIG[0]["channels"]
+
+
+class MaxVitSmallTfUnet(MaxVitTinyTfUnet):
+    FEATURE_CONFIG = [
+        {"down": 2,  "channels":  64},   # stem out
+        {"down": 4,  "channels":  96},   # stage0 out
+        {"down": 8,  "channels": 192},   # stage1 out
+        {"down": 16, "channels": 384},   # stage2 out
+        {"down": 32, "channels": 768},   # stage3 out
+    ]
+    MODEL_NAME = "maxvit_small_tf_512"
+    
 
 if __name__ == "__main__":
     model = timm.create_model("maxvit_large_tf_512", features_only=True, out_indices=(0,1,2,3,4))

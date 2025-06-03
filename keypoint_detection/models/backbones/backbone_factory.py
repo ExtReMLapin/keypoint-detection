@@ -5,7 +5,7 @@ from keypoint_detection.models.backbones.base_backbone import Backbone
 from keypoint_detection.models.backbones.convnext_unet import ConvNeXtUnet
 from keypoint_detection.models.backbones.dilated_cnn import DilatedCnn
 from keypoint_detection.models.backbones.dinov2 import DinoV2Up
-from keypoint_detection.models.backbones.maxvit_unet import MaxVitPicoUnet, MaxVitUnet, MaxVitSmallUnet, MaxVitLargeUnet
+from keypoint_detection.models.backbones.maxvit_unet import MaxVitPicoUnet, MaxVitUnet, MaxVitSmallUnet, MaxVitLargeUnet, MaxVitTinyTfUnet, MaxVitSmallTfUnet
 from keypoint_detection.models.backbones.mobilenetv3 import MobileNetV3
 from keypoint_detection.models.backbones.s3k import S3K
 from keypoint_detection.models.backbones.unet import Unet
@@ -27,6 +27,8 @@ class BackboneFactory:
         MobileNetV3,
         DinoV2Up,
         CoarseNetBackbone,
+        MaxVitTinyTfUnet,
+        MaxVitSmallTfUnet
     ]
 
     @staticmethod
