@@ -129,7 +129,7 @@ def train(hparams: dict) -> Tuple[KeypointDetector, pl.Trainer]:
     #model = torch.compile(model)
     trainer.fit(model, data_module)
 
-    if "json_test_dataset_path" in hparams:
+    if "json_test_dataset_path" in hparams and hparams.get("json_test_dataset_path"):
         # check if we have a best checkpoint, if not, use the current weights but log a warning
         # it makes more sense to evaluate on the best checkpoint because, i.e. the best validation score obtained.
         # evaluating on the current weights is more noisy and would also result in lower evaluation scores if overfitting happens
