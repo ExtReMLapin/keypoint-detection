@@ -115,10 +115,49 @@ def create_heatmap_batch(
         (torch.Tensor): N x H x W Tensor with N heatmaps
     """
 
-    batch_heatmaps = [generate_channel_heatmap(shape, keypoints[i], sigma, device) for i in range(len(keypoints))]
+    batch_heatmaps = [generate_channel_heatmap_alternative(shape, keypoints[i], sigma, device) for i in range(len(keypoints))]
     batch_heatmaps = torch.stack(batch_heatmaps, dim=0)
     return batch_heatmaps
 
+
+def generate_channel_heatmap_alternative(
+    image_size: Tuple[int, int], keypoints: torch.Tensor, sigma: float, device: torch.device
+) -> torch.Tensor:
+    """
+    Alternative memory-efficient implementation that processes one keypoint at a time.
+    Even more memory conservative but potentially slower for many keypoints.
+    """
+    assert isinstance(keypoints, torch.Tensor)
+
+    if keypoints.numel() == 0:
+        return torch.zeros(image_size, device=device)
+
+    # Create coordinate grids once
+    u_axis = torch.linspace(0, image_size[1] - 1, image_size[1], device=device)
+    v_axis = torch.linspace(0, image_size[0] - 1, image_size[0], device=device)
+    v_grid, u_grid = torch.meshgrid(v_axis, u_axis, indexing="ij")
+
+    # Initialize the final heatmap
+    final_heatmap = torch.zeros(image_size, device=device)
+    
+    sigma_squared = sigma * sigma
+    
+    # Process one keypoint at a time for maximum memory efficiency
+    for i in range(keypoints.shape[0]):
+        kp = keypoints[i]
+        
+        # Center grids around this keypoint
+        u_centered = u_grid - kp[0]
+        v_centered = v_grid - kp[1]
+        
+        # Create gaussian blob for this keypoint
+        keypoint_heatmap = torch.exp(
+            -0.5 * (u_centered * u_centered + v_centered * v_centered) / sigma_squared
+        )
+        
+        # Combine using max operation
+        final_heatmap = torch.maximum(final_heatmap, keypoint_heatmap)
+    return final_heatmap
 
 def generate_channel_heatmap(
     image_size: Tuple[int, int], keypoints: torch.Tensor, sigma: float, device: torch.device
