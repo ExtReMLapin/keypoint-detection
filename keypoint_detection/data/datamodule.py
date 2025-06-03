@@ -90,7 +90,7 @@ class KeypointsDataModule(pl.LightningDataModule):
             aspect_ratio = img_width / img_height
             train_transform = MultiChannelKeypointsCompose(
                 [
-                    A.RandomBrightnessContrast(p=0.5),
+                    A.RandomBrightnessContrast(p=0.5, brightness_limit=[-0.5, 0.5], contrast_limit=[-0.9, 0.5]),
                     A.RandomResizedCrop(
                         (img_height, img_width), scale=(0.5, 1.0), ratio=(0.7 , 1.3), p=0.1
                     ),
@@ -108,7 +108,7 @@ class KeypointsDataModule(pl.LightningDataModule):
                     A.RandomGamma(p=0.1),
                     A.SaltAndPepper(p=0.1),
                     A.ImageCompression(quality_range=[20,60], p=0.2),
-                    A.RGBShift(r_shift_limit=[-127, 127], g_shift_limit=[-127, 127], b_shift_limit=[-127, 127], p=0.2),
+                    A.RGBShift(r_shift_limit=[-127, 127], g_shift_limit=[-127, 127], b_shift_limit=[-127, 127], p=0.1),
                     A.Spatter(p=0.1),
                     A.PixelDropout(p=0.1, dropout_prob=0.1),
                 ]
